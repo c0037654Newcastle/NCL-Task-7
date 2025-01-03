@@ -1,11 +1,12 @@
 # Possible Approach Based on FACT-GPT: Fact-Checking Augmentation via Claim Matching with LLMs
-from load import df_fact_checks, df_posts, df_fact_check_post_mapping
-
 import requests, json
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 import nltk
 import re
+
+import importlib.util
+import os
 
 nltk.download('wordnet')
 nltk.download('omw-1.4')
@@ -13,6 +14,16 @@ nltk.download('omw-1.4')
 lemmatizer = WordNetLemmatizer()
 
 stop_words = list(stopwords.words('english'))+['list', 'extracted', 'key', 'entities']
+
+def load_data():
+    directory = os.path.dirname(__file__)
+    load_data_path = os.path.join(directory, "sample_data", "load.py")
+
+    spec = importlib.util.spec_from_file_location("load", load_data_path)
+    load = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(load)
+
+    return load.df_fact_checks, load.df_posts, load.df_fact_check_post_mapping
 
 # Need to download ollama from: https://ollama.com/download, to then download llama3.2:3b or any model (current is llama3.2:latest, which is the 3b model)
 def Query_LLM_chat(model, prompt, parameters):    
@@ -63,11 +74,11 @@ def Entity_extract(post):
 
 
 # Was supposed to be used to filter for a specific language, but made accuracy worse
-def Fact_filter(post_lang):
+def Fact_filter(facts):
     possible_facts = []
     fact_id = 0 
 
-    for fact in df_fact_checks["claim"]:
+    for fact in facts["claim"]:
         # Cleaning the facts and adding the corresponding fact_id
         clean_fact = re.sub(r'[^\w\s]', '', fact[1].lower())
         possible_facts.append(f"fact_id {fact_id}: {clean_fact}")
@@ -147,11 +158,11 @@ def Fact_decision(post_id, post, possible_facts, fact_points):
 
 
 # Validating the answer, by finding the correct post to fact mapping in df_fact_check_post_mapping csv.
-def valid_prediction(num_of_correct, post_id, fact_id):
+def valid_prediction(num_of_correct, post_id, fact_id, posts, facts, mapping):
     
-    new_post_id = df_posts.index.to_list()[post_id]
+    new_post_id = posts.index.to_list()[post_id]
 
-    new_fact_id = df_fact_checks.index.to_list()[fact_id]
+    new_fact_id = facts.index.to_list()[fact_id]
 
     pair_id = df_fact_check_post_mapping[df_fact_check_post_mapping['post_id'] == new_post_id].index.to_list()[0]
 
@@ -166,11 +177,14 @@ def valid_prediction(num_of_correct, post_id, fact_id):
 
 
 # Main Script
+
+facts, posts, mapping = load_data()
+
 num_of_correct = 0
 
-for post_id in range(len(df_posts)):
-    post = df_posts["text"].iloc[post_id]
-    ocr = df_posts["ocr"].iloc[post_id]
+for post_id in range(len(posts)):
+    post = posts["text"].iloc[post_id]
+    ocr = posts["ocr"].iloc[post_id]
 
     # Finding the valid textual information for each post, either in the text, ocr, or in both sections of the row.
     if post or ocr:
@@ -193,7 +207,7 @@ for post_id in range(len(df_posts)):
         # print(f"Entities: {entities}")
         # print()
 
-        facts = Fact_filter(post_lang)
+        facts = Fact_filter(facts)
 
         relevant_facts, fact_points = Fact_search(facts, entities)
         # For Testing Purposes:
@@ -203,8 +217,8 @@ for post_id in range(len(df_posts)):
 
         fact_id = Fact_decision(post_id, post_text, relevant_facts, fact_points)
 
-        print(f"Predict: {df_posts.index.to_list()[post_id]}, {df_fact_checks.index.to_list()[fact_id]}")
-        num_of_correct, correct_post_id, correct_fact_id = valid_prediction(num_of_correct, post_id, fact_id)
+        print(f"Predict: {posts.index.to_list()[post_id]}, {facts.index.to_list()[fact_id]}")
+        num_of_correct, correct_post_id, correct_fact_id = valid_prediction(num_of_correct, post_id, fact_id, posts, facts, mapping)
         print(f" Actual: {correct_post_id}, {correct_fact_id}")
         print(f"Number of Correct Predictions: {num_of_correct}")
 
