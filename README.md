@@ -3,7 +3,7 @@ Approach for the SemEval 2025 - Task 7
 
 - The Approach.py file is in the sample_data folder.
   - Requirements: Install Ollama (https://ollama.com/download) and the model of your choosing (Currently it is llama3.2:latest).
-  - To Run: Open a terminal or command prompt, navigate to the sample_data directory, and execute approach.py using Python.
+  - To Run: Open a terminal or command prompt, navigate to the directory, and execute approach.py using Python.
 
 ### Proposed Approach:
 
