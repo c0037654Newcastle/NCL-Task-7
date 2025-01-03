@@ -7,14 +7,13 @@ import os
 
 import pandas as pd
 
-our_dataset_path = '.'
+our_dataset_path = os.path.join(os.path.dirname(__file__))
 
 posts_path = os.path.join(our_dataset_path, 'trial_posts.csv')
 fact_checks_path = os.path.join(our_dataset_path, 'trial_fact_checks.csv')
 fact_check_post_mapping_path = os.path.join(our_dataset_path, 'trial_data_mapping.csv')
 
 for path in [posts_path, fact_checks_path, fact_check_post_mapping_path]:
-    print(f"Checking path: {path}")
     assert os.path.isfile(path)
 
 # We need to apply t = t.replace('\n', '\\n') for text fields before using `ast.literal_eval`.
