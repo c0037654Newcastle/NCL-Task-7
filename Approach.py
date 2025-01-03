@@ -164,10 +164,10 @@ def valid_prediction(num_of_correct, post_id, fact_id, posts, facts, mapping):
 
     new_fact_id = facts.index.to_list()[fact_id]
 
-    pair_id = df_fact_check_post_mapping[df_fact_check_post_mapping['post_id'] == new_post_id].index.to_list()[0]
+    pair_id = mapping[mapping['post_id'] == new_post_id].index.to_list()[0]
 
-    actual_post_id = df_fact_check_post_mapping['post_id'].iloc[pair_id]
-    actual_fact_id = df_fact_check_post_mapping['fact_check_id'].iloc[pair_id]
+    actual_post_id = mapping['post_id'].iloc[pair_id]
+    actual_fact_id = mapping['fact_check_id'].iloc[pair_id]
 
     # 1 point per correct answer, which is used to calculate the percentage accuracy at the end of the test.
     if actual_post_id == new_post_id and actual_fact_id == new_fact_id:
@@ -178,13 +178,13 @@ def valid_prediction(num_of_correct, post_id, fact_id, posts, facts, mapping):
 
 # Main Script
 
-facts, posts, mapping = load_data()
+df_facts, df_posts, df_mapping = load_data()
 
 num_of_correct = 0
 
-for post_id in range(len(posts)):
-    post = posts["text"].iloc[post_id]
-    ocr = posts["ocr"].iloc[post_id]
+for post_id in range(len(df_posts)):
+    post = df_posts["text"].iloc[post_id]
+    ocr = df_posts["ocr"].iloc[post_id]
 
     # Finding the valid textual information for each post, either in the text, ocr, or in both sections of the row.
     if post or ocr:
@@ -207,7 +207,7 @@ for post_id in range(len(posts)):
         # print(f"Entities: {entities}")
         # print()
 
-        facts = Fact_filter(facts)
+        facts = Fact_filter(df_facts)
 
         relevant_facts, fact_points = Fact_search(facts, entities)
         # For Testing Purposes:
@@ -217,8 +217,8 @@ for post_id in range(len(posts)):
 
         fact_id = Fact_decision(post_id, post_text, relevant_facts, fact_points)
 
-        print(f"Predict: {posts.index.to_list()[post_id]}, {facts.index.to_list()[fact_id]}")
-        num_of_correct, correct_post_id, correct_fact_id = valid_prediction(num_of_correct, post_id, fact_id, posts, facts, mapping)
+        print(f"Predict: {df_posts.index.tolist()[post_id]}, {df_facts.index.tolist()[fact_id]}")
+        num_of_correct, correct_post_id, correct_fact_id = valid_prediction(num_of_correct, post_id, fact_id, df_posts, df_facts, df_mapping)
         print(f" Actual: {correct_post_id}, {correct_fact_id}")
         print(f"Number of Correct Predictions: {num_of_correct}")
 
