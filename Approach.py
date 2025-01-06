@@ -4,7 +4,8 @@ from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 import nltk
 import re
-
+import torch 
+from sentence_transformers import SentenceTransformer, util
 import importlib.util
 import os
 
@@ -17,6 +18,7 @@ class FactMap():
         self.stop_words = list(stopwords.words('english'))+['list', 'extracted', 'key', 'entities']
         self.facts = df_facts
         self.posts = df_posts
+        self.sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
 
     # Need to download ollama from: https://ollama.com/download, to then download llama3.2:3b or any model (current is llama3.2:latest, which is the 3b model)
     def query_llm(self, model, prompt, parameters):    
@@ -97,6 +99,17 @@ class FactMap():
             aligned_facts = possible_facts
         
         return aligned_facts, fact_points
+    
+    def similar_fact(self, possible_facts, entities):
+
+        sentence_embeddings = self.sentence_model.encode(possible_facts)
+        target_embedding = self.sentence_model.encode(" ".join(entities))
+
+        cosine_similarities = util.cos_sim(target_embedding, sentence_embeddings)[0]
+
+        sim_val_list, sim_id_list = torch.topk(cosine_similarities, k=10, largest=True)
+
+        return sim_id_list.tolist(), sim_val_list[0].item()
 
     def decide_facts(self, post_id, post, possible_facts, fact_points):
         # prompt the LLM
@@ -116,6 +129,8 @@ class FactMap():
         parameters = {"temperature": 0, "max_tokens": 50, "top_p": 0.6}
 
         response = self.query_llm("llama3.2:latest", prompt, parameters)
+
+        # TO-DO: NEED TO MAKE SURE THAT THIS METHOD PRINTS OUT A LIST OF AT LEAST 10 
 
         print(response)
 
@@ -138,7 +153,7 @@ class FactMap():
 
                 match = re.search(r'fact_id\s*(\d+)', fact) 
                 fact_id = match.group(1)
-                print("NEED EXTRA")
+                print("fact_id ...:")
                 return int(fact_id)
             except:
                 print("No fact_id found in the response and no facts provided.")
@@ -208,9 +223,16 @@ if __name__ == "__main__":
 
             facts = fact_mapper.clean_facts()
 
-            relevant_facts, fact_points = fact_mapper.align_facts(facts, entities)
+            sim_fact_id, sim_val = fact_mapper.similar_fact(facts, entities)
+            print("sim value:", sim_val)
 
-            fact_id = fact_mapper.decide_facts(post_id, post_text, relevant_facts, fact_points)
+            print(sim_fact_id)
+
+            if sim_val < 0.45:
+                relevant_facts, fact_points = fact_mapper.align_facts(facts, entities)
+                fact_id = fact_mapper.decide_facts(post_id, post_text, relevant_facts, fact_points)
+            else:
+                fact_id = sim_fact_id[0]
 
             print(f"Predict: {df_posts.index.tolist()[post_id]}, {df_facts.index.tolist()[fact_id]}")
             correct_post_id, correct_fact_id = eval.valid_prediction(post_id, fact_id)
