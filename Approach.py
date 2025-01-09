@@ -18,7 +18,7 @@ class FactMap():
         self.stop_words = list(stopwords.words('english'))+['list', 'extracted', 'key', 'entities']
         self.facts = df_facts
         self.posts = df_posts
-        self.sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+        self.sentence_model = SentenceTransformer('intfloat/e5-base-v2') 
 
     # Need to download ollama from: https://ollama.com/download, to then download llama3.2:3b or any model (current is llama3.2:latest, which is the 3b model)
     def query_llm(self, model, prompt, parameters):    
@@ -109,55 +109,39 @@ class FactMap():
 
         sim_val_list, sim_id_list = torch.topk(cosine_similarities, k=10, largest=True)
 
-        return sim_id_list.tolist(), sim_val_list[0].item()
+        top30_sim_val_list, top30_sim_id_list = torch.topk(cosine_similarities, k=30, largest=True)
+
+        top30_facts = [possible_facts[idx] for idx in top30_sim_id_list.tolist()]
+
+        return sim_id_list.tolist(), sim_val_list[0].item(), top30_facts
 
     def decide_facts(self, post_id, post, possible_facts, fact_points):
         # prompt the LLM
         facts = '- ' + '\n- '.join(possible_facts)
 
         prompt = [
-            {"role": "system", "content": "Identify the fact that is most closely aligned with the Twitter post provided by the user. Only respond with the corresponding fact_id."},
-            {"role": "user", "content": "post_id 1: NASA announces a new Artemis mission to land astronauts on the Moon by 2025, aiming to establish a sustainable lunar presence.\n\nThese are the related facts:\n1. fact_id: 10 - NASA announces a partnership with SpaceX for lunar lander development.\n2. fact_id: 20 - The Artemis program aims to establish a sustainable presence on the Moon by 2025.\n3. fact_id: 30 - NASA plans to launch the James Webb Space Telescope in 2021."},
-            {"role": "assistant", "content": "fact_id: 20"},
-            {"role": "user", "content": "post_id 2: Tesla unveils its first electric semi-truck at a press event in Austin, Texas, aiming to revolutionize freight transportation.\n\nThese are the related facts:\n1. fact_id: 15 - Tesla announces plans for a new gigafactory in Texas.\n2. fact_id: 25 - Tesla's electric semi-truck is designed to reduce emissions in freight transportation.\n3. fact_id: 35 - Tesla shares hit record highs after a successful quarter."},
-            {"role": "assistant", "content": "fact_id: 25"},
-            {"role": "user", "content": "post_id 3: Lionel Messi scores a stunning free-kick for Inter Miami in a thrilling match against LA Galaxy in the MLS. #GOAT\n\nThese are the related facts:\n1. fact_id: 40 - Lionel Messi makes his debut for Inter Miami in a friendly match.\n2. fact_id: 50 - Lionel Messi scores a match-winning free-kick for Inter Miami in the MLS.\n3. fact_id: 60 - Inter Miami announces a new signing from Barcelona."},
-            {"role": "assistant", "content": "fact_id: 50"},
-            {"role": "user", "content": f"post_id {post_id}: {post}.\n\nThese are the related facts:\n{facts}"}
+            {"role": "system", "content": "Identify 10 facts that is most closely aligned with the Twitter post provided by the user. Only respond with 10 fact_ids in a python list, e.g. [..., ..., ..., ...]"},
+            # {"role": "user", "content": "post_id 1: NASA announces a new Artemis mission to land astronauts on the Moon by 2025, aiming to establish a sustainable lunar presence.\n\nThese are the related facts:\n1. fact_id: 10 - NASA announces a partnership with SpaceX for lunar lander development.\n2. fact_id: 20 - The Artemis program aims to establish a sustainable presence on the Moon by 2025.\n3. fact_id: 30 - NASA plans to launch the James Webb Space Telescope in 2021."},
+            # {"role": "assistant", "content": "fact_id: 20"},
+            # {"role": "user", "content": "post_id 2: Tesla unveils its first electric semi-truck at a press event in Austin, Texas, aiming to revolutionize freight transportation.\n\nThese are the related facts:\n1. fact_id: 15 - Tesla announces plans for a new gigafactory in Texas.\n2. fact_id: 25 - Tesla's electric semi-truck is designed to reduce emissions in freight transportation.\n3. fact_id: 35 - Tesla shares hit record highs after a successful quarter."},
+            # {"role": "assistant", "content": "fact_id: 25"},
+            # {"role": "user", "content": "post_id 3: Lionel Messi scores a stunning free-kick for Inter Miami in a thrilling match against LA Galaxy in the MLS. #GOAT\n\nThese are the related facts:\n1. fact_id: 40 - Lionel Messi makes his debut for Inter Miami in a friendly match.\n2. fact_id: 50 - Lionel Messi scores a match-winning free-kick for Inter Miami in the MLS.\n3. fact_id: 60 - Inter Miami announces a new signing from Barcelona."},
+            # {"role": "assistant", "content": "fact_id: 50"},
+            {"role": "user", "content": f"post_id {post_id}: {post}. These are the related facts:\n{facts}"}
         ]
 
         parameters = {"temperature": 0, "max_tokens": 50, "top_p": 0.6}
 
         response = self.query_llm("llama3.2:latest", prompt, parameters)
 
-        # TO-DO: NEED TO MAKE SURE THAT THIS METHOD PRINTS OUT A LIST OF AT LEAST 10 
+        print("LLM Response:", response)
 
-        print(response)
+        fact_id_list = eval(response.strip())
 
-        # Trying to find 'fact_id:' in the text to extract the id number
-        match = re.search(r'fact_id:\s*(\d+)', response)
+        print("List:", fact_id_list)
+        print(type(fact_id_list))
 
-        # If able to find the 'fact_id:'
-        if match:
-            fact_id = match.group(1)
-            return int(fact_id)
-        else:
-        # If unable to find the 'fact_id:'
-            try:
-                # Use the if from the fact which had the highest number of matching entities with the post
-                highest_fact_point = max(fact_points)
-
-                position = fact_points.index(highest_fact_point)
-
-                fact = possible_facts[position]
-
-                match = re.search(r'fact_id\s*(\d+)', fact) 
-                fact_id = match.group(1)
-                print("fact_id ...:")
-                return int(fact_id)
-            except:
-                print("No fact_id found in the response and no facts provided.")
-                return -1
+        return fact_id_list, fact_id_list[0]
 
 
 class Evaluate():
@@ -204,7 +188,7 @@ if __name__ == "__main__":
 
     fact_mapper = FactMap(df_facts, df_posts)
 
-    eval = Evaluate(df_facts, df_posts, df_mapping, 0)
+    evaluate = Evaluate(df_facts, df_posts, df_mapping, 0)
 
     for post_id in range(len(df_posts)):
         post = df_posts["text"].iloc[post_id]
@@ -223,21 +207,21 @@ if __name__ == "__main__":
 
             facts = fact_mapper.clean_facts()
 
-            sim_fact_id, sim_val = fact_mapper.similar_fact(facts, entities)
+            sim_fact_id, sim_val, top30_facts = fact_mapper.similar_fact(facts, entities)
             print("sim value:", sim_val)
 
             print(sim_fact_id)
 
-            if sim_val < 0.45:
-                relevant_facts, fact_points = fact_mapper.align_facts(facts, entities)
-                fact_id = fact_mapper.decide_facts(post_id, post_text, relevant_facts, fact_points)
+            if sim_val < 0.825:
+                relevant_facts, fact_points = fact_mapper.align_facts(top30_facts, entities)
+                fact_list, fact_id = fact_mapper.decide_facts(post_id, post_text, top30_facts, fact_points)
             else:
                 fact_id = sim_fact_id[0]
 
             print(f"Predict: {df_posts.index.tolist()[post_id]}, {df_facts.index.tolist()[fact_id]}")
-            correct_post_id, correct_fact_id = eval.valid_prediction(post_id, fact_id)
+            correct_post_id, correct_fact_id = evaluate.valid_prediction(post_id, fact_id)
             print(f" Actual: {correct_post_id}, {correct_fact_id}")
-            print(f"Number of Correct Predictions: {eval.num_correct}")
+            print(f"Number of Correct Predictions: {evaluate.num_correct}")
 
             print("----")
 
