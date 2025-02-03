@@ -1,16 +1,58 @@
-# Possible Approach Based on FACT-GPT: Fact-Checking Augmentation via Claim Matching with LLMs
-import requests, json
+import os
+import re
+import json
+import faiss
+import nltk
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
-import nltk
+import numpy as np
 import re
 import torch 
 from sentence_transformers import SentenceTransformer, util
 import importlib.util
 import os
+from datetime import datetime
+
+from timeit import default_timer as timer
+
+import langid
+import langcodes
+
+import requests
+from bs4 import BeautifulSoup
+
+from langdetect import detect
+
+from transformers import (
+    TokenClassificationPipeline,
+    AutoModelForTokenClassification,
+    AutoTokenizer,
+    pipeline
+)
+from transformers.pipelines import AggregationStrategy
+import numpy as np
+
+import spacy
+import faiss
 
 nltk.download('wordnet')
 nltk.download('omw-1.4')
+
+class KeyphraseExtractionPipeline(TokenClassificationPipeline):
+    def __init__(self, model, *args, **kwargs):
+        super().__init__(
+            model=AutoModelForTokenClassification.from_pretrained(model),
+            tokenizer=AutoTokenizer.from_pretrained(model),
+            *args,
+            **kwargs
+        )
+
+    def postprocess(self, all_outputs):
+        results = super().postprocess(
+            all_outputs=all_outputs,
+            aggregation_strategy=AggregationStrategy.FIRST,
+        )
+        return np.unique([result.get("word").strip() for result in results])
 
 class FactMap():
     def __init__(self, df_facts, df_posts):
@@ -18,162 +60,144 @@ class FactMap():
         self.stop_words = list(stopwords.words('english'))+['list', 'extracted', 'key', 'entities']
         self.facts = df_facts
         self.posts = df_posts
-        self.sentence_model = SentenceTransformer('intfloat/e5-base-v2') 
+        self.processor = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.sentence_model = SentenceTransformer("jinaai/jina-embeddings-v3", trust_remote_code=True, device=self.processor)
+        self.extractor = KeyphraseExtractionPipeline(model="ml6team/keyphrase-extraction-kbir-kpcrowd")
+        self.NER = spacy.load("en_core_web_sm")
 
-    # Need to download ollama from: https://ollama.com/download, to then download llama3.2:3b or any model (current is llama3.2:latest, which is the 3b model)
-    def query_llm(self, model, prompt, parameters):    
-        response = requests.post(
-            "http://0.0.0.0:11434/api/chat",
-            json={"model": model, "messages": prompt, "stream": False, "options": parameters}
-        )
+    def clean_facts(self, fact_id_index):
+        possible_facts = {}
+        language_indexes = {}
+        language_facts = ['eng', 'fra', 'deu', 'por', 'spa', 'tha', 'msa', 'ara']
+        faiss_facts = {}
+        res = faiss.StandardGpuResources()
 
-        try:
-            response_text = response.text
-            llm_response = json.loads(response_text)
-            return llm_response['message']['content']
-        except Exception as e:
-            return("Error:", e)
+        for index, fact in enumerate(self.facts["claim"]):
+
+            try:
+                df_fact = self.facts.iloc[index]
+                joined_fact = f"{fact[1]}. {df_fact["title"][1]}"
+            except:
+                joined_fact = fact[1]
+
+            clean_fact = re.sub(r'[^\w\s]', '', joined_fact)
+
+            fact_id = fact_id_index[index]
+
+            # try:
+            #     fact_language = detect(fact[0])
+            # except:
+            #     fact_language = "Unknown"
         
-    def extract_entities(self, post):
-        #3-Shot Example (currently the examples aren't used as they were causing errors with the LLM responses)
-        prompt = [
-            {"role": "system", "content": "Extract the key entities (names, places, events, or concepts) from the Twitter post provided by the user. Only respond with entities that are contained in the Twitter post in a list format."},
-            # {"role": "user", "content": f"NASA announces a new Artemis mission to land astronauts on the Moon by 2025, aiming to establish a sustainable lunar presence."},
-            # {"role": "assistant", "content": f"NASA, Artemis, mission, astronauts, Moon, 2025, lunar"},
-            # {"role": "user", "content": f"Tesla unveils its first electric semi-truck at a press event in Austin, Texas, aiming to revolutionize freight transportation."},
-            # {"role": "assistant", "content": f"electric semi-truck, press event, Austin, Texas, freight transportation"},
-            # {"role": "user", "content": f"Lionel Messi scores a stunning free-kick for Inter Miami in a thrilling match against LA Galaxy in the MLS. #GOAT"},
-            # {"role": "assistant", "content": f"Lionel Messi, free-kick, Inter Miami, LA Galaxy, MLS, GOAT"},
-            {"role": "user", "content": f"{post}"}
-        ]
+            # # fact_language, confidence = langid.classify(fact[0])
 
-        parameters = {"temperature": 0.2, "max_tokens": 50, "top_p": 0.6}
+            # language_name = langcodes.Language.make(language=fact_language).display_name()
 
-        response = self.query_llm("llama3.2:latest", prompt, parameters).lower()
+            language_name = fact[2][0][0]
 
-        # if response from LLM, is not extracting entities but actually rejecting to answer due to it's guard rails. Then just use the post to find the entities
-        if "can't" in response or "cannot" in response or "no entities" in response or "none" in response:
-            response = post.lower()
+            if len(language_name) == 1:
+                language_name = fact[2][0]
 
-        # Cleaning and filtering the responses to ensure only the key entities are returned
-        clean_response = re.sub(r'[^\w\s]', '', response)
+            if language_name  not in possible_facts:
+                possible_facts[language_name] = []
+            if language_name  not in language_indexes:
+                print(language_name)
+                language_indexes[language_name] = []
 
-        filtered_response = ' '.join([w for w in clean_response.split() if w.lower() not in self.stop_words])
+            possible_facts[language_name].append(clean_fact)
+            language_indexes[language_name].append(fact_id)
 
-        entities = filtered_response.split()
-        
-        lem_entities = [self.lemmatizer.lemmatize(entity.lower()) for entity in entities]
+        for language in possible_facts.keys():
+            print("Language:", language)
+            print(len(possible_facts[language]))
 
-        return lem_entities
+            encoded_fact = self.sentence_model.encode(possible_facts[language], device=self.processor, convert_to_tensor=False, show_progress_bar=True)
 
-    # Was supposed to be used to filter for a specific language, but made accuracy worse
-    def clean_facts(self):
-        possible_facts = []
+            dimension = encoded_fact[0].shape[0]
+            print("Dimension:", dimension)
+            index_cpu = faiss.IndexFlatL2(dimension)
 
-        for fact_id, fact in enumerate(self.facts["claim"]):
-            # Cleaning the facts and adding the corresponding fact_id
-            clean_fact = re.sub(r'[^\w\s]', '', fact[1].lower())
-            possible_facts.append(f"fact_id {fact_id}: {clean_fact}")
+            index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
 
-            fact_id += 1
+            index.add(np.array(encoded_fact))
+                          
+            faiss_facts[language] = index
 
-        return possible_facts
+        all_index = faiss.IndexFlatL2(dimension)
 
-    def align_facts(self, possible_facts, entities):
-        aligned_facts = []
-        fact_points = []
+        for language in possible_facts.keys():
+            all_index.add(faiss_facts[language].reconstruct_n(0, faiss_facts[language].ntotal))
 
-        for possible_fact in possible_facts:
-            points = 0
-            for entity in entities:
-                # If entity is found in fact
-                if re.search(rf'\b{re.escape(entity)}s?\b', possible_fact, re.IGNORECASE):
-                    points += 1
-            # Fact must have at least 1 common entity with the post to be used as evidence (threshold needs to be tested).
-            if points >= 1:
-                aligned_facts.append(possible_fact)
-                fact_points.append(points)
-
-        # If no facts align with the entities from the post, then all facts are used (need to work to find more efficient solution)
-        if len(aligned_facts) == 0:
-            aligned_facts = possible_facts
-        
-        return aligned_facts, fact_points
+        return faiss_facts, language_facts, language_indexes, all_index, dimension
     
-    def similar_fact(self, possible_facts, entities):
+    def similar_fact(self, fa_embedding, post_text):
+        facts = []
+        sim_dist = []
 
-        sentence_embeddings = self.sentence_model.encode(possible_facts)
-        target_embedding = self.sentence_model.encode(" ".join(entities))
-
-        cosine_similarities = util.cos_sim(target_embedding, sentence_embeddings)[0]
-
-        sim_val_list, sim_id_list = torch.topk(cosine_similarities, k=10, largest=True)
-
-        top30_sim_val_list, top30_sim_id_list = torch.topk(cosine_similarities, k=30, largest=True)
-
-        top30_facts = [possible_facts[idx] for idx in top30_sim_id_list.tolist()]
-
-        return sim_id_list.tolist(), sim_val_list[0].item(), top30_facts
-
-    def decide_facts(self, post_id, post, possible_facts, fact_points):
-        # prompt the LLM
-        facts = '- ' + '\n- '.join(possible_facts)
-
-        prompt = [
-            {"role": "system", "content": "Identify 10 facts that is most closely aligned with the Twitter post provided by the user. Only respond with 10 fact_ids in a python list, e.g. [..., ..., ..., ...]"},
-            # {"role": "user", "content": "post_id 1: NASA announces a new Artemis mission to land astronauts on the Moon by 2025, aiming to establish a sustainable lunar presence.\n\nThese are the related facts:\n1. fact_id: 10 - NASA announces a partnership with SpaceX for lunar lander development.\n2. fact_id: 20 - The Artemis program aims to establish a sustainable presence on the Moon by 2025.\n3. fact_id: 30 - NASA plans to launch the James Webb Space Telescope in 2021."},
-            # {"role": "assistant", "content": "fact_id: 20"},
-            # {"role": "user", "content": "post_id 2: Tesla unveils its first electric semi-truck at a press event in Austin, Texas, aiming to revolutionize freight transportation.\n\nThese are the related facts:\n1. fact_id: 15 - Tesla announces plans for a new gigafactory in Texas.\n2. fact_id: 25 - Tesla's electric semi-truck is designed to reduce emissions in freight transportation.\n3. fact_id: 35 - Tesla shares hit record highs after a successful quarter."},
-            # {"role": "assistant", "content": "fact_id: 25"},
-            # {"role": "user", "content": "post_id 3: Lionel Messi scores a stunning free-kick for Inter Miami in a thrilling match against LA Galaxy in the MLS. #GOAT\n\nThese are the related facts:\n1. fact_id: 40 - Lionel Messi makes his debut for Inter Miami in a friendly match.\n2. fact_id: 50 - Lionel Messi scores a match-winning free-kick for Inter Miami in the MLS.\n3. fact_id: 60 - Inter Miami announces a new signing from Barcelona."},
-            # {"role": "assistant", "content": "fact_id: 50"},
-            {"role": "user", "content": f"post_id {post_id}: {post}. These are the related facts:\n{facts}"}
-        ]
-
-        parameters = {"temperature": 0, "max_tokens": 50, "top_p": 0.6}
-
-        response = self.query_llm("llama3.2:latest", prompt, parameters)
-
-        print("LLM Response:", response)
-
-        fact_id_list = eval(response.strip())
-
-        print("List:", fact_id_list)
-        print(type(fact_id_list))
-
-        return fact_id_list, fact_id_list[0]
-
-
-class Evaluate():
-    def __init__(self, df_facts, df_posts, df_mappings, num_of_correct):
-        self.facts = df_facts
-        self.posts = df_posts
-        self.mappings = df_mappings
-        self.num_correct = num_of_correct
+        post_embedding = self.sentence_model.encode(post_text, device=self.processor)
+        post_embedding = post_embedding.reshape(1, -1)
         
+        k = 250
+        distances, indicies = fa_embedding.search(post_embedding, k)
 
-    # Validating the answer, by finding the correct post to fact mapping in df_fact_check_post_mapping csv.
-    def valid_prediction(self, post_id, fact_id):
-        
-        new_post_id = self.posts.index.to_list()[post_id]
+        top100_facts = [(idx, distances[0][i]) for i, idx in enumerate(indicies[0])]
 
-        new_fact_id = self.facts.index.to_list()[fact_id]
+        for fact, sim in top100_facts:
+            facts.append(fact)
+            sim_dist.append(sim)
 
-        pair_id = self.mappings[self.mappings['post_id'] == new_post_id].index.to_list()[0]
+        return facts, sim_dist
+    
+    def align_facts(self, post_date, similar_facts, fact_indexes):
 
-        actual_post_id = self.mappings['post_id'].iloc[pair_id]
-        actual_fact_id = self.mappings['fact_check_id'].iloc[pair_id]
+        filtered_facts = []
 
-        # 1 point per correct answer, which is used to calculate the percentage accuracy at the end of the test.
-        if actual_post_id == new_post_id and actual_fact_id == new_fact_id:
-            self.num_correct += 1
+        print("Amount of Similar Facts:", len(similar_facts))
+        print(similar_facts[:10])
 
-        return actual_post_id, actual_fact_id
+        if post_date != None:
 
+            for num in similar_facts:
+
+                index_fact_id = self.facts.index.to_list().index(int(fact_indexes[num]))
+
+                timestamp = df_facts["instances"].iloc[index_fact_id][0][0]
+
+                if timestamp != None:
+
+                    if isinstance(timestamp, str):
+                        dt_object = datetime.fromisoformat(timestamp)
+                        timestamp = int(dt_object.timestamp())
+
+                    if abs(timestamp - post_date) < (9*30*24*60*60):
+
+                        filtered_facts.append(num)
+
+                else:
+                    if similar_facts.index(num)/len(similar_facts) <= 0.30:
+                        print(similar_facts.index(num)/len(similar_facts))
+                        filtered_facts.append(num)
+        else: 
+
+            filtered_facts = similar_facts[:10]
+
+        print("Amount of Filtered Facts:", len(filtered_facts))
+
+        if len(filtered_facts) < 10:
+            for value in similar_facts:
+                if value not in filtered_facts:
+                    filtered_facts.append(value)
+                if len(filtered_facts) == 10:  
+                    break
+
+        print(filtered_facts[:10])
+            
+        return filtered_facts[:10]
+    
 
 def load_data():
     directory = os.path.dirname(__file__)
-    load_data_path = os.path.join(directory, "sample_data", "load.py")
+    load_data_path = os.path.join(directory, "Test_Data", "load.py")
 
     spec = importlib.util.spec_from_file_location("load", load_data_path)
     load = importlib.util.module_from_spec(spec)
@@ -184,45 +208,117 @@ def load_data():
 
 if __name__ == "__main__":
 
+    start = timer()
+
+    file = "Test_Data/crosslingual_predictions.json"
+
+    with open(file, "r") as json_file:
+        predictions = json.load(json_file)
+
+    post_id_list = list(predictions.keys())
+
     df_facts, df_posts, df_mapping = load_data()
 
     fact_mapper = FactMap(df_facts, df_posts)
 
-    evaluate = Evaluate(df_facts, df_posts, df_mapping, 0)
+    # evaluate = Evaluate(df_facts, df_posts, df_mapping, 0)
+    fact_id_index = df_facts.index.to_list()
 
-    for post_id in range(len(df_posts)):
-        post = df_posts["text"].iloc[post_id]
-        ocr = df_posts["ocr"].iloc[post_id]
+    facts_embedding, languages, language_index, total_embedding, fiass_dimension = fact_mapper.clean_facts(fact_id_index)
+
+    total_index = []
+
+    for lang in language_index.keys():
+        total_index.extend(language_index[lang])
+
+    print("Length of Total Index:",len(total_index))
+
+    for i, post_id in enumerate(post_id_list):
+        final_index = []
+        fact_indexes = []
+
+        # To use the index in df_posts of the post_id
+        index_post_id = df_posts.index.to_list().index(int(post_id))
+
+        post = df_posts["text"].iloc[index_post_id]
+        ocr = df_posts["ocr"].iloc[index_post_id]
+        post_dt = df_posts["instances"].iloc[index_post_id][0][0]
+
+        if isinstance(post_dt, str):  
+            dt_object = datetime.fromisoformat(post_dt)
+            post_dt= int(dt_object.timestamp())
+
+        post_lang = []
 
         # Finding the valid textual information for each post, either in the text, ocr, or in both sections of the row.
+        print(post_id)
         if post or ocr:
             if post and ocr:
-                post_text = post[1] + ocr[0][1]
+                org_text = f"{post[0]}. {ocr[0][0]}"
+                post_text = f"{post[1]}. {ocr[0][1]}"
+                post_lang = post[2] + ocr[0][2]
             elif post:
+                org_text = post[0]
                 post_text = post[1]
+                post_lang = post[2]
             elif ocr:
+                org_text = ocr[0][0]
                 post_text = ocr[0][1]
+                post_lang = ocr[0][2]
 
-            entities = fact_mapper.extract_entities(post_text)
+            language_name = post_lang[0][0]
 
-            facts = fact_mapper.clean_facts()
+            if len(language_name) == 1:
+                language_name = post_lang[0]
 
-            sim_fact_id, sim_val, top30_facts = fact_mapper.similar_fact(facts, entities)
-            print("sim value:", sim_val)
+            if language_name in language_index.keys():
 
-            print(sim_fact_id)
+                print(language_name)
 
-            if sim_val < 0.825:
-                relevant_facts, fact_points = fact_mapper.align_facts(top30_facts, entities)
-                fact_list, fact_id = fact_mapper.decide_facts(post_id, post_text, top30_facts, fact_points)
+                sim_fact_ids, sim_val = fact_mapper.similar_fact(facts_embedding[language_name], post_text)
+
+                print("Similarity Values:", sim_val[:10])
+
+                fact_indexes = language_index[language_name]
+
+                if len(sim_fact_ids) < 10:
+                    print("UNDER 10 FACTS")
+                    sim_fact_ids, sim_val = fact_mapper.similar_fact(total_embedding, post_text)
+
+                    fact_indexes = total_index
             else:
-                fact_id = sim_fact_id[0]
 
-            print(f"Predict: {df_posts.index.tolist()[post_id]}, {df_facts.index.tolist()[fact_id]}")
-            correct_post_id, correct_fact_id = evaluate.valid_prediction(post_id, fact_id)
-            print(f" Actual: {correct_post_id}, {correct_fact_id}")
-            print(f"Number of Correct Predictions: {evaluate.num_correct}")
+                print("Language Not:", language_name)
 
-            print("----")
+                sim_fact_ids, sim_val = fact_mapper.similar_fact(total_embedding, post_text)
 
-    print(f"Accuracy: {(eval.num_correct/(post_id+1))*100}%")
+                fact_indexes = total_index
+
+                print("Similarity Values:", sim_val[:10])
+
+
+            print("Similar Facts:", len(sim_fact_ids))
+
+            if post_dt:
+                facts = fact_mapper.align_facts(post_dt, sim_fact_ids, fact_indexes)
+            else:
+                facts = sim_fact_ids[:10]
+
+            print("Filtered Facts:", len(facts))
+
+            for num in facts:
+
+                final_index.append(fact_indexes[num])
+
+            predictions[post_id] = final_index
+
+            print(predictions[f"{post_id}"])
+
+            print(f"{round(i/len(post_id_list) * 100, 2)}%")
+            print()
+
+end = timer()
+print(end-start)
+
+with open("crosslingual_predictions.json", "w") as json_file:
+    json.dump(predictions, json_file)
